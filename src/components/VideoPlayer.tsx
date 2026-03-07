@@ -78,22 +78,40 @@ export default function VideoPlayer({
     const isM3U8 = url.includes('.m3u8') ||
       (source.sources.find((s) => s.quality === selectedQuality || s.quality === 'default')?.isM3U8 ?? false);
 
-    // Proxy M3U8 through Next.js to add Referer header (CDN blocks direct browser requests)
-    const proxiedUrl = isM3U8
-      ? `/api/hls?url=${encodeURIComponent(url)}&referer=${encodeURIComponent('https://megacloud.blog/')}`
-      : url;
+    const proxiedUrl = `/api/hls?url=${encodeURIComponent(url)}&referer=${encodeURIComponent('https://megacloud.blog/')}`;
 
     if (isM3U8 && Hls.isSupported()) {
-      const hls = new Hls({ enableWorker: true });
-      hlsRef.current = hls;
-      hls.loadSource(proxiedUrl);
-      hls.attachMedia(video);
+      // Try direct URL first — CDNs block Vercel server IPs but allow browser IPs.
+      // If direct load fails fatally, fall back to the server-side proxy.
+      let usedProxy = false;
+
+      const createHls = (src: string) => {
+        const hls = new Hls({ enableWorker: true });
+        hlsRef.current = hls;
+        hls.loadSource(src);
+        hls.attachMedia(video);
+
+        hls.on(Hls.Events.ERROR, (_, data) => {
+          if (data.fatal && !usedProxy) {
+            usedProxy = true;
+            hls.destroy();
+            createHls(proxiedUrl);
+          }
+        });
+      };
+
+      createHls(url);
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      // Safari native HLS
-      video.src = proxiedUrl;
+      // Safari native HLS — try direct, proxy as fallback
+      video.src = url;
       video.load();
+      video.onerror = () => {
+        video.src = proxiedUrl;
+        video.load();
+        video.onerror = null;
+      };
     } else {
-      video.src = proxiedUrl;
+      video.src = url;
       video.load();
     }
 
