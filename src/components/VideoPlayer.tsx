@@ -78,7 +78,8 @@ export default function VideoPlayer({
     const isM3U8 = url.includes('.m3u8') ||
       (source.sources.find((s) => s.quality === selectedQuality || s.quality === 'default')?.isM3U8 ?? false);
 
-    const proxiedUrl = `/api/hls?url=${encodeURIComponent(url)}&referer=${encodeURIComponent('https://megacloud.blog/')}`;
+    const aniwatchBase = process.env.NEXT_PUBLIC_ANIWATCH_API_URL ?? 'http://localhost:4000';
+    const proxiedUrl = `${aniwatchBase}/hls-proxy?url=${encodeURIComponent(url)}&referer=${encodeURIComponent('https://megacloud.blog/')}`;
 
     if (isM3U8 && Hls.isSupported()) {
       // Try direct URL first — CDNs block Vercel server IPs but allow browser IPs.
