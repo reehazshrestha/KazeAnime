@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+// Run on Vercel Edge Runtime — edge nodes have non-datacenter IPs that CDNs allow
+export const runtime = 'edge';
+
 // Proxy HLS streams server-side so the browser doesn't hit CORS/Referer blocks
 export async function GET(req: NextRequest) {
   const url = req.nextUrl.searchParams.get('url');
@@ -12,7 +15,12 @@ export async function GET(req: NextRequest) {
       headers: {
         Referer: referer,
         Origin: new URL(referer).origin,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'cross-site',
       },
       cache: 'no-store',
     });
