@@ -6,6 +6,7 @@ import { notFound } from 'next/navigation';
 import { FiPlay, FiList } from 'react-icons/fi';
 import { getAnimeInfo, isStubEpisodeId } from '@/lib/api';
 import WatchlistButton from '@/components/WatchlistButton';
+import ResumeButton from '@/components/ResumeButton';
 
 interface Props {
   params: { id: string };
@@ -117,6 +118,7 @@ async function AnimeDetailContent({ id }: { id: string }) {
                 </button>
               </Link>
             )}
+            <ResumeButton animeId={anime.id} />
             <WatchlistButton
               anime={{
                 id: anime.id,
