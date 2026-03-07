@@ -30,7 +30,7 @@ export default function AnimeCard({ anime, index = 0 }: AnimeCardProps) {
       initial={{ opacity: 0, y: 24 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.4, delay: index * 0.06, type: 'spring', damping: 18 }}
-      whileHover={interactive ? { y: -6, transition: { duration: 0.2 } } : false}
+      whileHover={interactive ? { y: -6, transition: { duration: 0.2 } } : undefined}
       onAnimationComplete={() => setInteractive(true)}
       className={`group relative${interactive ? '' : ' pointer-events-none'}`}
     >
