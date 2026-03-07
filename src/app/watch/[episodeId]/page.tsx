@@ -70,8 +70,8 @@ export default function WatchPage() {
     }
 
     // Retry sources once on failure (dev StrictMode fires effects twice, first may get rate-limited)
-    const fetchSources = () => getEpisodeSources(decodedId)
-      .catch(() => new Promise<ReturnType<typeof getEpisodeSources>>((res, rej) =>
+    const fetchSources = (): Promise<EpisodeSource> => getEpisodeSources(decodedId)
+      .catch(() => new Promise<EpisodeSource>((res, rej) =>
         setTimeout(() => getEpisodeSources(decodedId).then(res).catch(rej), 1500)
       ));
 
