@@ -29,8 +29,7 @@ async function anilistQuery<T>(
 
 
 // ─────────────────────────────────────────────────────────────────────────────
-// aniwatch-api  (local — full HLS streaming via HiAnime)
-// github.com/ghoshRitesh12/aniwatch-api
+// aniwatch-api  (HiAnime — episode list + streaming sources)
 // ─────────────────────────────────────────────────────────────────────────────
 const ANIWATCH_URL = (process.env.NEXT_PUBLIC_ANIWATCH_API_URL ?? '').replace(/\/$/, '');
 
@@ -46,7 +45,6 @@ export function isStreamingConfigured(): boolean {
   return Boolean(ANIWATCH_URL);
 }
 
-// Search aniwatch-api to get the HiAnime slug for an anime title
 async function getAniwatchSlug(title: string): Promise<string | null> {
   if (!ANIWATCH_URL) return null;
   try {
@@ -56,7 +54,7 @@ async function getAniwatchSlug(title: string): Promise<string | null> {
     );
     if (!res.ok) return null;
     const json = await res.json() as {
-      data: { animes: { id: string; name: string; type: string }[] };
+      data: { animes: { id: string; name: string }[] };
     };
     const animes = json.data?.animes ?? [];
     if (!animes.length) return null;
@@ -67,7 +65,6 @@ async function getAniwatchSlug(title: string): Promise<string | null> {
   }
 }
 
-// Fetch episode list from aniwatch-api — IDs stored as "{anilistId}:{aniwatchEpId}"
 async function getAniwatchEpisodes(slug: string, anilistId: string) {
   if (!ANIWATCH_URL) return [];
   try {
@@ -79,7 +76,6 @@ async function getAniwatchEpisodes(slug: string, anilistId: string) {
     const json = await res.json() as {
       data: { episodes: { episodeId: string; number: number; title: string }[] };
     };
-    // ID format: "{anilistId}:{epNumber}:{aniwatchEpId}" so the watch page can always read epNumber from URL
     return (json.data?.episodes ?? []).map((ep) => ({
       id: `${anilistId}:${ep.number}:${ep.episodeId}`,
       number: ep.number,
@@ -91,26 +87,29 @@ async function getAniwatchEpisodes(slug: string, anilistId: string) {
 }
 
 interface AniwatchSourceResponse {
-  status: number;
   data: {
     tracks: { url: string; lang: string }[];
     intro:  { start: number; end: number };
-    outro:  { start: number; end: number };
     sources: { url: string; type: string }[];
   };
 }
 
 async function fetchAniwatchSources(episodeId: string): Promise<EpisodeSource> {
   if (!ANIWATCH_URL) throw new Error('NEXT_PUBLIC_ANIWATCH_API_URL is not configured');
-  // episodeId is already in aniwatch format: "one-piece-100?ep=2142"
-  const url = `${aniwatchBase()}/episode/sources?animeEpisodeId=${encodeURIComponent(episodeId)}&server=hd-1&category=sub`;
-  const res = await fetch(url, { cache: 'no-store' });
-  if (!res.ok) throw new Error(`aniwatch ${res.status}`);
+  const base = aniwatchBase();
+  const encoded = encodeURIComponent(episodeId);
+  const servers = ['hd-1', 'hd-2', 'hd-4'];
+  let res: Response | null = null;
+  for (const server of servers) {
+    const url = `${base}/episode/sources?animeEpisodeId=${encoded}&server=${server}&category=sub`;
+    res = await fetch(url, { cache: 'no-store' });
+    if (res.ok) break;
+    if (res.status !== 403 && res.status !== 500) break; // don't retry on 4xx other than 403
+  }
+  if (!res || !res.ok) throw new Error(`aniwatch ${res?.status ?? 'no response'}`);
   const json = await res.json() as AniwatchSourceResponse;
-
   const data = json.data;
   if (!data?.sources?.length) throw new Error('No sources returned');
-
   return {
     sources: data.sources.map((s) => ({
       url: s.url,
@@ -123,6 +122,7 @@ async function fetchAniwatchSources(episodeId: string): Promise<EpisodeSource> {
     intro: data.intro?.end > 0 ? data.intro : undefined,
   };
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AniList internal types

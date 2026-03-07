@@ -19,6 +19,10 @@ export function useWatchHistory() {
         const seenTitles = new Map<string, WatchHistoryEntry>();
         for (const entry of Object.values(map)) {
           if (!/^\d+$/.test(entry.animeId)) continue;
+          // Skip entries with old aniwatch-format (?ep=) or old consumet HiAnime ($episode$) IDs
+          const epParts = (entry.episodeId ?? '').split(':');
+          const epId = epParts.slice(2).join(':');
+          if (epParts.length >= 3 && (epId.includes('?ep=') || epId.includes('$episode$'))) continue;
           const prev = seenTitles.get(entry.animeTitle);
           if (!prev || entry.updatedAt > prev.updatedAt) {
             seenTitles.set(entry.animeTitle, entry);

@@ -78,39 +78,22 @@ export default function VideoPlayer({
     const isM3U8 = url.includes('.m3u8') ||
       (source.sources.find((s) => s.quality === selectedQuality || s.quality === 'default')?.isM3U8 ?? false);
 
-    const aniwatchBase = process.env.NEXT_PUBLIC_ANIWATCH_API_URL ?? 'http://localhost:4000';
-    const proxiedUrl = `${aniwatchBase}/hls-proxy?url=${encodeURIComponent(url)}&referer=${encodeURIComponent('https://megacloud.blog/')}`;
+    const proxyBase = (process.env.NEXT_PUBLIC_HLS_PROXY_URL ?? '').replace(/\/$/, '');
+    const proxiedUrl = proxyBase
+      ? `${proxyBase}?url=${encodeURIComponent(url)}&referer=${encodeURIComponent('https://megacloud.blog/')}`
+      : null;
 
     if (isM3U8 && Hls.isSupported()) {
-      // Try direct URL first — CDNs block Vercel server IPs but allow browser IPs.
-      // If direct load fails fatally, fall back to the server-side proxy.
-      let usedProxy = false;
-
-      const createHls = (src: string) => {
-        const hls = new Hls({ enableWorker: true });
-        hlsRef.current = hls;
-        hls.loadSource(src);
-        hls.attachMedia(video);
-
-        hls.on(Hls.Events.ERROR, (_, data) => {
-          if (data.fatal && !usedProxy) {
-            usedProxy = true;
-            hls.destroy();
-            createHls(proxiedUrl);
-          }
-        });
-      };
-
-      createHls(url);
+      // CDNs require Referer header — use CF Worker proxy directly if configured.
+      const src = proxiedUrl ?? url;
+      const hls = new Hls({ enableWorker: true });
+      hlsRef.current = hls;
+      hls.loadSource(src);
+      hls.attachMedia(video);
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      // Safari native HLS — try direct, proxy as fallback
-      video.src = url;
+      // Safari native HLS — use proxy if configured
+      video.src = proxiedUrl ?? url;
       video.load();
-      video.onerror = () => {
-        video.src = proxiedUrl;
-        video.load();
-        video.onerror = null;
-      };
     } else {
       video.src = url;
       video.load();
