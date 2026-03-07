@@ -16,6 +16,7 @@ interface VideoPlayerProps {
   initialTime?: number;
   episodeTitle?: string;
   onNextEpisode?: () => void;
+  onError?: () => void;
 }
 
 function formatTime(secs: number): string {
@@ -31,6 +32,7 @@ export default function VideoPlayer({
   initialTime = 0,
   episodeTitle,
   onNextEpisode,
+  onError,
 }: VideoPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -48,7 +50,10 @@ export default function VideoPlayer({
   const [subtitleOpen, setSubtitleOpen] = useState(false);
   const [selectedSubtitle, setSelectedSubtitle] = useState<number | null>(null);
   const [clickFlash, setClickFlash] = useState<{ key: number; paused: boolean } | null>(null);
+  const [isBuffering, setIsBuffering] = useState(true);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onErrorRef = useRef(onError);
+  useEffect(() => { onErrorRef.current = onError; }, [onError]);
 
   // Pick best source URL
   const getSrc = useCallback(
@@ -78,21 +83,55 @@ export default function VideoPlayer({
     const isM3U8 = url.includes('.m3u8') ||
       (source.sources.find((s) => s.quality === selectedQuality || s.quality === 'default')?.isM3U8 ?? false);
 
-    const proxyBase = (process.env.NEXT_PUBLIC_HLS_PROXY_URL ?? '').replace(/\/$/, '');
-    const proxiedUrl = proxyBase
-      ? `${proxyBase}?url=${encodeURIComponent(url)}&referer=${encodeURIComponent('https://megacloud.blog/')}`
-      : null;
+    const cfProxy = (process.env.NEXT_PUBLIC_HLS_PROXY_URL ?? '').replace(/\/$/, '');
+    const renderProxy = (process.env.NEXT_PUBLIC_ANIWATCH_API_URL ?? '').replace(/\/$/, '') + '/hls-proxy';
+    const referer = source.headers?.Referer ?? 'https://megacloud.blog/';
+    const makeProxied = (base: string, rawUrl: string) =>
+      `${base}?url=${encodeURIComponent(rawUrl)}&referer=${encodeURIComponent(referer)}`;
+
+    const proxiedUrl = cfProxy ? makeProxied(cfProxy, url) : makeProxied(renderProxy, url);
+
+    setIsBuffering(true);
+
+    // Guard: only fire onError once per load attempt
+    let errorFired = false;
+    const fireError = () => { if (!errorFired) { errorFired = true; onErrorRef.current?.(); } };
+
+    const HLS_CONFIG: Partial<Hls['config']> = {
+      enableWorker: true,
+      manifestLoadingTimeOut: 8000,
+      manifestLoadingMaxRetry: 1,
+      fragLoadingTimeOut: 10000,
+      fragLoadingMaxRetry: 2,
+      startLevel: -1, // auto quality selection
+    };
 
     if (isM3U8 && Hls.isSupported()) {
-      // CDNs require Referer header — use CF Worker proxy directly if configured.
-      const src = proxiedUrl ?? url;
-      const hls = new Hls({ enableWorker: true });
+      const src = proxiedUrl;
+      const hls = new Hls(HLS_CONFIG);
       hlsRef.current = hls;
       hls.loadSource(src);
       hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => setIsBuffering(false));
+
+      // CF Worker blocked → fall back to HF Space proxy; both fail → cycle server
+      hls.on(Hls.Events.ERROR, (_evt, data) => {
+        if (!data.fatal) return;
+        if (cfProxy && src.startsWith(cfProxy)) {
+          hls.destroy();
+          hlsRef.current = null;
+          const hls2 = new Hls(HLS_CONFIG);
+          hlsRef.current = hls2;
+          hls2.loadSource(makeProxied(renderProxy, url));
+          hls2.attachMedia(video);
+          hls2.on(Hls.Events.MANIFEST_PARSED, () => setIsBuffering(false));
+          hls2.on(Hls.Events.ERROR, (_e, d) => { if (d.fatal) fireError(); });
+        } else {
+          fireError();
+        }
+      });
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      // Safari native HLS — use proxy if configured
-      video.src = proxiedUrl ?? url;
+      video.src = proxiedUrl;
       video.load();
     } else {
       video.src = url;
@@ -222,11 +261,20 @@ export default function VideoPlayer({
         ref={videoRef}
         onTimeUpdate={handleTimeUpdate}
         onLoadedMetadata={(e) => setDuration((e.target as HTMLVideoElement).duration)}
-        onPlay={() => setPlaying(true)}
+        onPlay={() => { setPlaying(true); setIsBuffering(false); }}
         onPause={() => setPlaying(false)}
+        onWaiting={() => setIsBuffering(true)}
+        onCanPlay={() => setIsBuffering(false)}
         className="w-full h-full object-contain"
         playsInline
       />
+
+      {/* Buffering spinner */}
+      {isBuffering && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-30">
+          <div className="w-12 h-12 rounded-full border-4 border-white/20 border-t-accent animate-spin" />
+        </div>
+      )}
 
       {/* Persistent center play/pause button — z-20 so it sits above the controls overlay */}
       <div className={`absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-20 pointer-events-none transition-opacity duration-200 ${

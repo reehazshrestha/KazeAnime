@@ -98,18 +98,32 @@ async function fetchAniwatchSources(episodeId: string): Promise<EpisodeSource> {
   if (!ANIWATCH_URL) throw new Error('NEXT_PUBLIC_ANIWATCH_API_URL is not configured');
   const base = aniwatchBase();
   const encoded = encodeURIComponent(episodeId);
-  const servers = ['hd-1', 'hd-2', 'hd-4'];
-  let res: Response | null = null;
-  for (const server of servers) {
-    const url = `${base}/episode/sources?animeEpisodeId=${encoded}&server=${server}&category=sub`;
-    res = await fetch(url, { cache: 'no-store' });
-    if (res.ok) break;
-    if (res.status !== 403 && res.status !== 500) break; // don't retry on 4xx other than 403
+  const attempts = [
+    { server: 'hd-1', category: 'sub' },
+    { server: 'hd-2', category: 'sub' },
+    { server: 'hd-4', category: 'sub' },
+    { server: 'hd-1', category: 'dub' },
+  ];
+  type RawResponse = AniwatchSourceResponse & { message?: string };
+  let lastJson: RawResponse | null = null;
+  for (const { server, category } of attempts) {
+    const url = `${base}/episode/sources?animeEpisodeId=${encoded}&server=${server}&category=${category}`;
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) {
+      if (res.status === 403 || res.status === 500) continue;
+      break;
+    }
+    const json = await res.json() as RawResponse;
+    if (json.data?.sources?.length) {
+      lastJson = json;
+      break;
+    }
+    lastJson = json; // keep last for error message
   }
-  if (!res || !res.ok) throw new Error(`aniwatch ${res?.status ?? 'no response'}`);
-  const json = await res.json() as AniwatchSourceResponse;
-  const data = json.data;
-  if (!data?.sources?.length) throw new Error('No sources returned');
+  if (!lastJson?.data?.sources?.length) {
+    throw new Error(lastJson?.message ?? 'No sources returned');
+  }
+  const data = lastJson.data;
   return {
     sources: data.sources.map((s) => ({
       url: s.url,
@@ -331,13 +345,94 @@ export async function getAnimeInfo(id: string): Promise<AnimeInfo> {
   };
 }
 
-/** Get streaming sources for an episode via aniwatch-api */
+/** Get streaming sources for an episode via aniwatch-api (auto-retries servers) */
 export async function getEpisodeSources(episodeId: string): Promise<EpisodeSource> {
   if (isStubEpisodeId(episodeId)) throw new Error('STUB_EPISODE');
   // Format: "{anilistId}:{epNumber}:{aniwatchEpId}" e.g. "21:1:one-piece-100?ep=2142"
   const parts = episodeId.split(':');
   const aniwatchId = parts.length >= 3 ? parts.slice(2).join(':') : episodeId;
   return fetchAniwatchSources(aniwatchId);
+}
+
+/** Get streaming sources from a specific server (no retry) */
+export async function getEpisodeSourcesFromServer(
+  episodeId: string,
+  server: string,
+  category: string,
+): Promise<EpisodeSource> {
+  if (isStubEpisodeId(episodeId)) throw new Error('STUB_EPISODE');
+  if (!ANIWATCH_URL) throw new Error('NEXT_PUBLIC_ANIWATCH_API_URL is not configured');
+  const parts = episodeId.split(':');
+  const aniwatchId = parts.length >= 3 ? parts.slice(2).join(':') : episodeId;
+  const base = aniwatchBase();
+  const encoded = encodeURIComponent(aniwatchId);
+  const url = `${base}/episode/sources?animeEpisodeId=${encoded}&server=${server}&category=${category}`;
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`aniwatch ${res.status}`);
+  const json = await res.json() as AniwatchSourceResponse & { message?: string };
+  if (!json.data?.sources?.length) throw new Error(json.message ?? 'No sources returned');
+  const data = json.data;
+  return {
+    sources: data.sources.map((s) => ({
+      url: s.url,
+      isM3U8: s.type === 'hls' || s.url.includes('.m3u8'),
+      quality: 'default',
+    })),
+    subtitles: data.tracks
+      .filter((t) => t.lang !== 'thumbnails' && t.url.includes('.vtt'))
+      .map((t) => ({ url: t.url, lang: t.lang })),
+    intro: data.intro?.end > 0 ? data.intro : undefined,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Consumet — Gogoanime fallback streaming
+// ─────────────────────────────────────────────────────────────────────────────
+const CONSUMET_URL = (process.env.NEXT_PUBLIC_CONSUMET_API_URL ?? '').replace(/\/$/, '');
+
+async function getGogoAnimeId(title: string): Promise<string | null> {
+  if (!CONSUMET_URL) return null;
+  try {
+    const res = await fetch(`${CONSUMET_URL}/anime/gogoanime/${encodeURIComponent(title)}`, { cache: 'no-store' });
+    if (!res.ok) return null;
+    const json = await res.json() as { results: { id: string; title: string }[] };
+    const results = json.results ?? [];
+    if (!results.length) return null;
+    const titleLower = title.toLowerCase();
+    return results.find((r) => r.title.toLowerCase() === titleLower)?.id ?? results[0].id;
+  } catch { return null; }
+}
+
+async function getGogoEpisodeId(title: string, epNumber: number): Promise<string | null> {
+  if (!CONSUMET_URL) return null;
+  const gogoId = await getGogoAnimeId(title);
+  if (!gogoId) return null;
+  try {
+    const res = await fetch(`${CONSUMET_URL}/anime/gogoanime/info/${encodeURIComponent(gogoId)}`, { cache: 'no-store' });
+    if (!res.ok) return null;
+    const json = await res.json() as { episodes: { id: string; number: number }[] };
+    return (json.episodes ?? []).find((e) => e.number === epNumber)?.id ?? null;
+  } catch { return null; }
+}
+
+/** Get streaming sources from Gogoanime via Consumet (fallback when HiAnime CDN blocks proxies) */
+export async function getGogoEpisodeSources(title: string, epNumber: number): Promise<EpisodeSource> {
+  if (!CONSUMET_URL) throw new Error('CONSUMET API not configured');
+  const episodeId = await getGogoEpisodeId(title, epNumber);
+  if (!episodeId) throw new Error('Episode not found on Gogoanime');
+  const res = await fetch(`${CONSUMET_URL}/anime/gogoanime/watch/${encodeURIComponent(episodeId)}`, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`Consumet ${res.status}`);
+  const json = await res.json() as {
+    headers?: { Referer?: string };
+    sources: { url: string; isM3U8: boolean; quality: string }[];
+    subtitles?: { url: string; lang: string }[];
+  };
+  if (!json.sources?.length) throw new Error('No sources from Consumet');
+  return {
+    headers: json.headers ?? {},
+    sources: json.sources.map((s) => ({ url: s.url, isM3U8: s.isM3U8, quality: s.quality })),
+    subtitles: json.subtitles?.map((s) => ({ url: s.url, lang: s.lang })) ?? [],
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

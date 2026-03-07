@@ -6,7 +6,7 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { motion } from 'framer-motion';
 import { FiArrowLeft, FiList } from 'react-icons/fi';
-import { getEpisodeSources, getAnimeInfo, isStubEpisodeId } from '@/lib/api';
+import { getEpisodeSources, getEpisodeSourcesFromServer, getAnimeInfo, isStubEpisodeId, getGogoEpisodeSources } from '@/lib/api';
 import VideoPlayer from '@/components/VideoPlayer';
 import { useWatchHistory } from '@/hooks/useWatchHistory';
 import type { EpisodeSource, AnimeInfo } from '@/types/anime';
@@ -46,6 +46,7 @@ export default function WatchPage() {
     : 1;
 
   const [source, setSource] = useState<EpisodeSource | null>(null);
+  const [serverLoading, setServerLoading] = useState<string | null>(null);
   // Initialize from cache — avoids full-page skeleton when switching episodes
   const [animeInfo, setAnimeInfo] = useState<AnimeInfo | null>(() => animeInfoCache.get(animeId) ?? null);
   const [loading, setLoading] = useState(true);
@@ -54,31 +55,74 @@ export default function WatchPage() {
   const [showEpList, setShowEpList] = useState(false);
   const currentEpRef = useRef<HTMLAnchorElement>(null);
   const epListRef = useRef<HTMLDivElement>(null);
+  const autoServerAttemptRef = useRef(0);
+  const [retryLabel, setRetryLabel] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!decodedId) return;
-    setLoading(true);
-    setError(null);
-    setSource(null); // clear old source so previous episode doesn't show while new one loads
+  const AUTO_SERVERS = [
+    { server: 'hd-1', category: 'sub', label: 'HD-1 Sub' },
+    { server: 'hd-2', category: 'sub', label: 'HD-2 Sub' },
+    { server: 'hd-4', category: 'sub', label: 'HD-4 Sub' },
+    { server: 'hd-1', category: 'dub', label: 'HD-1 Dub' },
+  ] as const;
 
-    // Stub IDs mean Consumet isn't configured — skip source fetch
-    if (isStub) {
-      getAnimeInfo(animeId).then((info) => setAnimeInfo(info)).catch(() => {});
-      setError('STUB');
-      setLoading(false);
+  // Called by VideoPlayer when both proxies fail — auto-cycles HiAnime servers then falls back to Gogoanime
+  const handleVideoError = useCallback(async () => {
+    const attempt = autoServerAttemptRef.current;
+    if (attempt > AUTO_SERVERS.length) return; // already gave up
+    autoServerAttemptRef.current = attempt + 1;
+
+    if (attempt < AUTO_SERVERS.length) {
+      const { server, category, label } = AUTO_SERVERS[attempt];
+      setRetryLabel(`Trying ${label}…`);
+      try {
+        const s = await getEpisodeSourcesFromServer(decodedId, server, category);
+        setRetryLabel(null);
+        setSource(s);
+      } catch {
+        void handleVideoError();
+      }
       return;
     }
 
-    // Retry sources once on failure (dev StrictMode fires effects twice, first may get rate-limited)
-    const fetchSources = (): Promise<EpisodeSource> => getEpisodeSources(decodedId)
-      .catch(() => new Promise<EpisodeSource>((res, rej) =>
-        setTimeout(() => getEpisodeSources(decodedId).then(res).catch(rej), 1500)
-      ));
+    // All HiAnime servers exhausted — try Gogoanime via Consumet
+    if (animeInfo) {
+      setRetryLabel('Trying Gogoanime…');
+      try {
+        const s = await getGogoEpisodeSources(animeInfo.title, epNumber);
+        setRetryLabel(null);
+        setSource(s);
+      } catch {
+        setRetryLabel(null);
+        setError('FETCH_FAILED');
+      }
+    } else {
+      setRetryLabel(null);
+      setError('FETCH_FAILED');
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [decodedId, animeInfo, epNumber]);
+
+  useEffect(() => {
+    if (!decodedId) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    setSource(null); // clear old source so previous episode doesn't show while new one loads
+    autoServerAttemptRef.current = 0; // reset auto-cycle for new episode
+
+    // Stub IDs mean Consumet isn't configured — skip source fetch
+    if (isStub) {
+      getAnimeInfo(animeId).then((info) => { if (!cancelled) setAnimeInfo(info); }).catch(() => {});
+      setError('STUB');
+      setLoading(false);
+      return () => { cancelled = true; };
+    }
 
     Promise.allSettled([
-      fetchSources(),
+      getEpisodeSources(decodedId),
       getAnimeInfo(animeId),
     ]).then(([srcResult, infoResult]) => {
+      if (cancelled) return;
       if (srcResult.status === 'fulfilled') {
         setSource(srcResult.value);
       } else {
@@ -113,6 +157,8 @@ export default function WatchPage() {
 
       setLoading(false);
     });
+
+    return () => { cancelled = true; };
   }, [decodedId, animeId, getProgress, saveProgress, epNumber]);
 
   // Throttled save – fires at most every 5 seconds while watching
@@ -240,7 +286,11 @@ export default function WatchPage() {
                     : `Episode ${resolvedEpNumber}`
                 }
                 onNextEpisode={nextEp ? goNextEpisode : undefined}
+                onError={handleVideoError}
               />
+              {retryLabel && (
+                <div className="mt-2 text-xs text-muted text-center animate-pulse">{retryLabel}</div>
+              )}
             </motion.div>
           ) : loading ? (
             <div className="w-full aspect-video rounded-xl bg-surface shimmer-bg" />
@@ -264,19 +314,47 @@ export default function WatchPage() {
             </div>
           )}
 
-          {/* Server / source selector placeholder */}
-          {source && source.sources.length > 1 && (
-            <div className="mt-5">
-              <p className="text-muted text-sm mb-2 font-medium">Available Servers</p>
-              <div className="flex flex-wrap gap-2">
-                {source.sources.map((s, i) => (
-                  <span key={i} className="text-xs px-3 py-1.5 rounded-lg bg-surface border border-border text-muted">
-                    {s.quality}
-                  </span>
-                ))}
+          {/* Server switcher */}
+          {source && !error && (() => {
+            const SERVERS = [
+              { server: 'hd-1', category: 'sub', label: 'HD-1 Sub' },
+              { server: 'hd-2', category: 'sub', label: 'HD-2 Sub' },
+              { server: 'hd-4', category: 'sub', label: 'HD-4 Sub' },
+              { server: 'hd-1', category: 'dub', label: 'HD-1 Dub' },
+            ];
+            return (
+              <div className="mt-5">
+                <p className="text-muted text-xs mb-2 font-medium uppercase tracking-wide">Switch Server</p>
+                <div className="flex flex-wrap gap-2">
+                  {SERVERS.map(({ server, category, label }) => {
+                    const key = `${server}-${category}`;
+                    const isLoading = serverLoading === key;
+                    return (
+                      <button
+                        key={key}
+                        disabled={isLoading}
+                        onClick={async () => {
+                          setServerLoading(key);
+                          try {
+                            const s = await getEpisodeSourcesFromServer(decodedId, server, category);
+                            setSource(s);
+                            setError(null);
+                          } catch {
+                            // keep current source, show nothing
+                          } finally {
+                            setServerLoading(null);
+                          }
+                        }}
+                        className="text-xs px-3 py-1.5 rounded-lg border transition-colors disabled:opacity-50 bg-surface border-border text-muted hover:border-accent hover:text-accent"
+                      >
+                        {isLoading ? '...' : label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
         </div>
 
         {/* Episode list sidebar */}

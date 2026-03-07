@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -36,6 +36,7 @@ export default function HeroCarousel({ items }: HeroCarouselProps) {
   const [index, setIndex] = useState(0);
   const [direction, setDirection] = useState(1);
   const { addToWatchlist, removeFromWatchlist, isInWatchlist } = useWatchlist();
+  const touchStartX = useRef(0);
 
   const paginate = useCallback(
     (dir: number) => {
@@ -55,8 +56,21 @@ export default function HeroCarousel({ items }: HeroCarouselProps) {
   const current = items[index];
   const inList = isInWatchlist(current.id);
 
+  const handleTouchStart = (e: React.TouchEvent) => {
+    touchStartX.current = e.touches[0].clientX;
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    const diff = touchStartX.current - e.changedTouches[0].clientX;
+    if (Math.abs(diff) > 50) paginate(diff > 0 ? 1 : -1);
+  };
+
   return (
-    <div className="relative w-full h-[520px] md:h-[620px] overflow-hidden rounded-2xl">
+    <div
+      className="relative w-full h-[520px] md:h-[620px] overflow-hidden rounded-2xl"
+      onTouchStart={handleTouchStart}
+      onTouchEnd={handleTouchEnd}
+    >
       <AnimatePresence custom={direction} initial={false} mode="popLayout">
         <motion.div
           key={current.id}
