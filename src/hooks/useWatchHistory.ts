@@ -25,9 +25,9 @@ export function useWatchHistory() {
           }
         }
         const cleaned: Record<string, WatchHistoryEntry> = {};
-        for (const entry of seenTitles.values()) {
+        seenTitles.forEach((entry) => {
           cleaned[entry.animeId] = entry;
-        }
+        });
         localStorage.setItem(STORAGE_KEY, JSON.stringify(cleaned));
 
         const sorted = Object.values(cleaned).sort(
